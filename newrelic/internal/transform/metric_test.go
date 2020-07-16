@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/newrelic/newrelic-telemetry-sdk-go/telemetry"
 	"go.opentelemetry.io/otel/api/kv"
@@ -14,6 +15,7 @@ import (
 	metricapi "go.opentelemetry.io/otel/api/metric"
 	"go.opentelemetry.io/otel/api/unit"
 	metricsdk "go.opentelemetry.io/otel/sdk/export/metric"
+	"go.opentelemetry.io/otel/sdk/export/metric/aggregation"
 	"go.opentelemetry.io/otel/sdk/metric/aggregator/minmaxsumcount"
 	sumAgg "go.opentelemetry.io/otel/sdk/metric/aggregator/sum"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -42,7 +44,7 @@ func TestServiceNameAttributes(t *testing.T) {
 func TestAttributes(t *testing.T) {
 	for i, test := range []struct {
 		res    *resource.Resource
-		opts   []metricapi.Option
+		opts   []metricapi.InstrumentOption
 		labels []kv.KeyValue
 		want   map[string]interface{}
 	}{
@@ -66,7 +68,7 @@ func TestAttributes(t *testing.T) {
 		},
 		{
 			res:    nil,
-			opts:   []metricapi.Option{metricapi.WithUnit(unit.Bytes)},
+			opts:   []metricapi.InstrumentOption{metricapi.WithUnit(unit.Bytes)},
 			labels: nil,
 			want: map[string]interface{}{
 				"unit": "By",
@@ -74,7 +76,7 @@ func TestAttributes(t *testing.T) {
 		},
 		{
 			res:    nil,
-			opts:   []metricapi.Option{metricapi.WithDescription("test description")},
+			opts:   []metricapi.InstrumentOption{metricapi.WithDescription("test description")},
 			labels: nil,
 			want: map[string]interface{}{
 				"description": "test description",
@@ -99,7 +101,7 @@ func TestAttributes(t *testing.T) {
 		},
 		{
 			res: resource.New(kv.String("K1", "V1"), kv.String("K2", "V2")),
-			opts: []metricapi.Option{
+			opts: []metricapi.InstrumentOption{
 				metricapi.WithUnit(unit.Milliseconds),
 				metricapi.WithDescription("d3"),
 			},
@@ -129,43 +131,39 @@ func TestAttributes(t *testing.T) {
 	}
 }
 
-var numKinds = []metric.NumberKind{metric.Int64NumberKind, metric.Uint64NumberKind, metric.Float64NumberKind}
+var numKinds = []metric.NumberKind{metric.Int64NumberKind, metric.Float64NumberKind}
 
 func TestMinMaxSumCountRecord(t *testing.T) {
 	name := "test-mmsc"
 	l := label.NewSet()
-	for _, iKind := range []metric.Kind{metric.MeasureKind, metric.ObserverKind} {
+	for _, iKind := range []metric.Kind{metric.ValueRecorderKind, metric.ValueObserverKind, metric.UpDownCounterKind, metric.UpDownSumObserverKind, metric.CounterKind, metric.SumObserverKind} {
 		for _, nKind := range numKinds {
 			desc := metric.NewDescriptor(name, iKind, nKind)
-			mmsc := minmaxsumcount.New(&desc)
+			mmsc := minmaxsumcount.New(2, &desc)
 
 			var n metric.Number
 			switch nKind {
 			case metric.Int64NumberKind:
 				n = metric.NewInt64Number(1)
-			case metric.Uint64NumberKind:
-				n = metric.NewUint64Number(1)
 			case metric.Float64NumberKind:
 				n = metric.NewFloat64Number(1)
 			}
-			if err := mmsc.Update(context.Background(), n, &desc); err != nil {
+			if err := mmsc[0].Update(context.Background(), n, &desc); err != nil {
 				t.Fatal(err)
 			}
 			switch nKind {
 			case metric.Int64NumberKind:
 				n = metric.NewInt64Number(10)
-			case metric.Uint64NumberKind:
-				n = metric.NewUint64Number(10)
 			case metric.Float64NumberKind:
 				n = metric.NewFloat64Number(10)
 			}
-			if err := mmsc.Update(context.Background(), n, &desc); err != nil {
+			if err := mmsc[0].Update(context.Background(), n, &desc); err != nil {
 				t.Fatal(err)
 			}
 
-			mmsc.Checkpoint(context.Background(), &desc)
+			mmsc[0].SynchronizedMove(&mmsc[1], &desc)
 
-			m, err := Record("", nil, metricsdk.NewRecord(&desc, &l, mmsc))
+			m, err := Record("", nil, metricsdk.NewRecord(&desc, &l, nil, mmsc[1].Aggregation(), time.Now(), time.Now())) // TODO add actual resource and times
 			if err != nil {
 				t.Fatalf("Record(MMSC,%s,%s) error: %v", nKind, iKind, err)
 			}
@@ -197,23 +195,21 @@ func TestSumRecord(t *testing.T) {
 	l := label.NewSet()
 	for _, nKind := range numKinds {
 		desc := metric.NewDescriptor(name, metric.CounterKind, nKind)
-		s := sumAgg.New()
+		s := sumAgg.New(2)
 
 		var n metric.Number
 		switch nKind {
 		case metric.Int64NumberKind:
 			n = metric.NewInt64Number(2)
-		case metric.Uint64NumberKind:
-			n = metric.NewUint64Number(2)
 		case metric.Float64NumberKind:
 			n = metric.NewFloat64Number(2)
 		}
-		if err := s.Update(context.Background(), n, &desc); err != nil {
+		if err := s[0].Update(context.Background(), n, &desc); err != nil {
 			t.Fatal(err)
 		}
 
-		s.Checkpoint(context.Background(), &desc)
-		m, err := Record("", nil, metricsdk.NewRecord(&desc, &l, s))
+		s[0].SynchronizedMove(&s[1], &desc)
+		m, err := Record("", nil, metricsdk.NewRecord(&desc, &l, nil, s[1].Aggregation(), time.Now(), time.Now())) // TODO add actual resource and times
 		if err != nil {
 			t.Fatalf("Record(SUM,%s) error: %v", nKind, err)
 		}
@@ -235,15 +231,22 @@ func TestSumRecord(t *testing.T) {
 
 type fakeAgg struct{}
 
+//TODO add compile-time check to make sure this implements the interface
+func (a fakeAgg) Kind() aggregation.Kind {
+	panic("implement me")
+}
+
 func (a fakeAgg) Update(context.Context, metric.Number, *metric.Descriptor) error { return nil }
-func (a fakeAgg) Checkpoint(context.Context, *metric.Descriptor)                  {}
-func (a fakeAgg) Merge(metricsdk.Aggregator, *metric.Descriptor) error            { return nil }
+func (a fakeAgg) SynchronizedMove(destination metricsdk.Aggregator, descriptor *metric.Descriptor) error {
+	return nil
+}
+func (a fakeAgg) Merge(metricsdk.Aggregator, *metric.Descriptor) error { return nil }
 
 func TestErrUnimplementedAgg(t *testing.T) {
 	fa := fakeAgg{}
 	desc := metric.NewDescriptor("", metric.CounterKind, metric.Int64NumberKind)
 	l := label.NewSet()
-	_, err := Record("", nil, metricsdk.NewRecord(&desc, &l, fa))
+	_, err := Record("", nil, metricsdk.NewRecord(&desc, &l, nil, fa, time.Now(), time.Now())) // TODO add actual resource and times
 	if !errors.Is(err, ErrUnimplementedAgg) {
 		t.Errorf("unexpected error: %v", err)
 	}
