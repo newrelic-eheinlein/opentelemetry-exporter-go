@@ -9,10 +9,12 @@ import (
 	"errors"
 
 	"github.com/newrelic/newrelic-telemetry-sdk-go/telemetry"
-	"github.com/newrelic/opentelemetry-exporter-go/newrelic/internal/transform"
+	"go.opentelemetry.io/otel/api/metric"
 	metricsdk "go.opentelemetry.io/otel/sdk/export/metric"
+	"go.opentelemetry.io/otel/sdk/export/metric/aggregation"
 	tracesdk "go.opentelemetry.io/otel/sdk/export/trace"
-	"go.opentelemetry.io/otel/sdk/resource"
+
+	"github.com/newrelic/opentelemetry-exporter-go/newrelic/internal/transform"
 )
 
 const (
@@ -77,10 +79,14 @@ func (e *Exporter) ExportSpan(ctx context.Context, span *tracesdk.SpanData) {
 	e.harvester.RecordSpan(transform.Span(e.serviceName, span))
 }
 
+func (e *Exporter) ExportKindFor(*metric.Descriptor, aggregation.Kind) metricsdk.ExportKind {
+	return metricsdk.DeltaExporter
+}
+
 // Export exports metrics to New Relic.
-func (e *Exporter) Export(_ context.Context, r *resource.Resource, cps metricsdk.CheckpointSet) error {
-	return cps.ForEach(func(record metricsdk.Record) error {
-		m, err := transform.Record(e.serviceName, r, record)
+func (e *Exporter) Export(_ context.Context, cps metricsdk.CheckpointSet) error {
+	return cps.ForEach(e, func(record metricsdk.Record) error {
+		m, err := transform.Record(e.serviceName, record.Resource(), record)
 		if err != nil {
 			return err
 		}

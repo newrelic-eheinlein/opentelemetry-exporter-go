@@ -10,7 +10,7 @@ import (
 	"go.opentelemetry.io/otel/api/label"
 	"go.opentelemetry.io/otel/api/metric"
 	metricsdk "go.opentelemetry.io/otel/sdk/export/metric"
-	"go.opentelemetry.io/otel/sdk/export/metric/aggregator"
+	"go.opentelemetry.io/otel/sdk/export/metric/aggregation"
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
@@ -24,17 +24,18 @@ var ErrUnimplementedAgg = errors.New("unimplemented aggregator")
 func Record(service string, res *resource.Resource, record metricsdk.Record) (telemetry.Metric, error) {
 	desc := record.Descriptor()
 	attrs := attributes(service, res, desc, record.Labels())
-	switch a := record.Aggregator().(type) {
-	case aggregator.MinMaxSumCount:
+	switch a := record.Aggregation().(type) {
+	case aggregation.MinMaxSumCount:
 		return minMaxSumCount(desc, attrs, a)
-	case aggregator.Sum:
+	case aggregation.Sum:
 		return sum(desc, attrs, a)
 	}
 	return nil, ErrUnimplementedAgg
 }
 
+// TODO see also https://github.com/open-telemetry/opentelemetry-go/blob/4f3fab3ba7df677205e673ae743ee067c99dbe87/exporters/otlp/ for concurrent implementation
 // sum transforms a Sum Aggregator aggregation into a Count Metric.
-func sum(desc *metric.Descriptor, attrs map[string]interface{}, a aggregator.Sum) (telemetry.Metric, error) {
+func sum(desc *metric.Descriptor, attrs map[string]interface{}, a aggregation.Sum) (telemetry.Metric, error) {
 	sum, err := a.Sum()
 	if err != nil {
 		return nil, err
@@ -49,7 +50,7 @@ func sum(desc *metric.Descriptor, attrs map[string]interface{}, a aggregator.Sum
 
 // minMaxSumCountValue returns the values of the MinMaxSumCount Aggregator
 // as discret values or any error returned from parsing any of the values.
-func minMaxSumCountValues(a aggregator.MinMaxSumCount) (min, max, sum metric.Number, count int64, err error) {
+func minMaxSumCountValues(a aggregation.MinMaxSumCount) (min, max, sum metric.Number, count int64, err error) {
 	if min, err = a.Min(); err != nil {
 		return
 	}
@@ -66,7 +67,7 @@ func minMaxSumCountValues(a aggregator.MinMaxSumCount) (min, max, sum metric.Num
 }
 
 // minMaxSumCount transforms a MinMaxSumCount aggregation into a Summary Metric.
-func minMaxSumCount(desc *metric.Descriptor, attrs map[string]interface{}, a aggregator.MinMaxSumCount) (telemetry.Metric, error) {
+func minMaxSumCount(desc *metric.Descriptor, attrs map[string]interface{}, a aggregation.MinMaxSumCount) (telemetry.Metric, error) {
 	min, max, sum, count, err := minMaxSumCountValues(a)
 	if err != nil {
 		return nil, err
